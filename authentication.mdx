@@ -1,0 +1,24 @@
+---
+title: Authentication & Tenancy
+description: Secure dual-authentication and Row Level Security.
+---
+
+The Zero API requires a strict dual-authentication model to ensure data isolation across boutique audit firms and their respective brand clients.
+
+<Warning>
+Requests missing either the Bearer Token or the `x-consultancy-id` header will be immediately rejected with a `401 Unauthorized`.
+</Warning>
+
+### 1. User Authentication
+All requests must include a standard HTTP Bearer token representing the authenticated user or service account.
+
+```bash
+Authorization: Bearer <your_api_token>
+```
+
+### 2. Tenant Scoping (RLS)
+Because Zero is a multi-tenant platform, every request must be scoped to a specific consultancy. This guarantees mathematical data isolation at the database level.
+
+```bash
+x-consultancy-id: <consultancy_uuid>
+```

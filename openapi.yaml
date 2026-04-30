@@ -1,0 +1,842 @@
+openapi: 3.1.0
+
+info:
+  title: Zero API
+  version: 1.0.0
+  license:
+    name: Proprietary
+    url: https://urbanelabs.xyz/terms
+  description: >
+    The Zero API provides programmatic access to the Urbane Labs compliance
+    engine. It allows enterprise ERPs to trigger asynchronous LangGraph document
+    ingestion, evaluate REACH SVHC chemical thresholds, and cryptographically
+    anchor Digital Product Passports to the Arweave permaweb.
+
+
+    **Note:** A sandbox environment is available to approved integration
+    partners. Contact api@urbanelabs.xyz to request sandbox credentials.
+
+servers:
+  - url: https://api.zero.urbanelabs.xyz/v1
+    description: Production
+
+security:
+  - BearerAuth: []
+    ConsultancyHeader: []
+
+# Both the Bearer token and the x-consultancy-id header are required on every
+# request. The Bearer token authenticates the user. The x-consultancy-id header
+# scopes the request to the correct tenant, satisfying Row Level Security at
+# the database layer. Requests missing either will return 401 Unauthorized.
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        JWT or opaque token issued by Urbane Labs. Include as
+        `Authorization: Bearer <token>` on every request.
+    ConsultancyHeader:
+      type: apiKey
+      in: header
+      name: x-consultancy-id
+      description: >
+        UUID of the consultancy tenant. Scopes all database queries to the
+        correct Row Level Security policy. Obtain this value from your Urbane
+        Labs onboarding email.
+
+  schemas:
+    ChemicalSubstance:
+      type: object
+      required:
+        - name
+        - cas_number
+        - weight_grams
+      properties:
+        name:
+          type: string
+          description: IUPAC or common name of the chemical substance.
+          example: Perfluorooctanoic acid (PFOA)
+        cas_number:
+          type: string
+          description: CAS Registry Number in the format XXXXXXX-XX-X.
+          pattern: '^\d{2,7}-\d{2}-\d$'
+          example: "335-67-1"
+        weight_grams:
+          type: number
+          format: double
+          description: Mass of the substance in grams present in the article.
+          example: 0.003
+        concentration_percentage:
+          type: number
+          format: double
+          description: >
+            Concentration of the substance as a percentage of the total article
+            weight. Required for REACH SVHC threshold evaluation.
+          example: 0.05
+
+    ArticleBOM:
+      type: object
+      required:
+        - name
+        - total_weight_grams
+        - material_composition
+      properties:
+        name:
+          type: string
+          description: Human-readable name of the article or sub-article.
+          example: Outer Shell
+        total_weight_grams:
+          type: number
+          format: double
+          description: >
+            Total weight of this article component in grams.
+
+
+            **Decimal format requirement:** European comma-separated decimals
+            (e.g., `"0,15"`) MUST be normalized to period-separated floats
+            (e.g., `0.15`) before submission. The API validates this strictly
+            and will return a 422 if a string value is received.
+          example: 320.5
+        material_composition:
+          type: string
+          description: >
+            Free-text or structured description of material composition (e.g.,
+            "78% Recycled Polyester, 22% Elastane").
+          example: "78% Recycled Polyester, 22% Elastane"
+        sub_articles:
+          type:
+            - array
+            - "null"
+          description: >
+            Nested child components of this article. Represents complex garment
+            structures (e.g., shell → lining → interlining). The recursive
+            `$ref` is intentional; code generators will terminate recursion when
+            `sub_articles` is null or omitted.
+          items:
+            $ref: '#/components/schemas/ArticleBOM'
+        svhc_list:
+          type: array
+          description: >
+            Substances of Very High Concern (SVHCs) detected or declared in
+            this article component. Evaluated against the REACH SVHC candidate
+            list threshold of 0.1% w/w.
+          items:
+            $ref: '#/components/schemas/ChemicalSubstance'
+
+    ComplianceViolation:
+      type: object
+      required:
+        - article_path
+        - substance_name
+        - cas_number
+        - concentration_percentage
+        - threshold_percentage
+      properties:
+        article_path:
+          type: string
+          description: >
+            Breadcrumb path identifying the specific article component where
+            the violation was detected.
+          example: "Jacket > DWR Coating"
+        substance_name:
+          type: string
+          description: Name of the non-compliant substance.
+          example: Perfluorooctanoic acid (PFOA)
+        cas_number:
+          type: string
+          description: CAS Registry Number of the non-compliant substance.
+          example: "335-67-1"
+        concentration_percentage:
+          type: number
+          format: double
+          description: Measured concentration of the substance as a percentage of article weight.
+          example: 0.23
+        threshold_percentage:
+          type: number
+          format: double
+          default: 0.1
+          description: >
+            Regulatory threshold above which the substance is considered
+            non-compliant. Defaults to 0.1% per REACH SVHC Article 7(2).
+          example: 0.1
+
+    StandardError:
+      type: object
+      required:
+        - code
+        - message
+        - request_id
+        - timestamp
+        - path
+      properties:
+        code:
+          type: string
+          description: >
+            Machine-readable error code. Use this field for programmatic error
+            handling rather than parsing the `message` string.
+          example: REACH_THRESHOLD_EXCEEDED
+        message:
+          type: string
+          description: Human-readable description of the error.
+          example: "One or more SVHC substances exceed the 0.1% w/w threshold."
+        request_id:
+          type: string
+          description: >
+            Unique identifier for this request. Include this value in all
+            support communications to enable log correlation.
+          example: req_01HZ8RNKPQ7X3M4V9CBJWDG5A
+        details:
+          type: array
+          description: >
+            Array of granular validation error messages, populated when the
+            error originates from Zod schema validation (HTTP 422). Each entry
+            identifies a specific field path and constraint violation.
+          items:
+            type: string
+          example:
+            - "body.articles[0].total_weight_grams: Expected number, received string"
+            - "body.articles[0].svhc_list[1].cas_number: Invalid CAS format"
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC timestamp at which the error was generated.
+          example: "2026-04-29T13:45:00.000Z"
+        path:
+          type: string
+          description: The API endpoint path that returned this error.
+          example: /v1/articles/reach-check
+
+paths:
+  /v1/documents/ingest:
+    post:
+      operationId: ingestDocument
+      summary: Submit document for asynchronous AI extraction
+      description: >
+        Triggers the LangGraph Vision AI pipeline and returns immediately.
+        Supported document types: CSV, PDF, JPEG, PNG. Clients must poll the
+        `check_url` for status updates — the extraction pipeline is
+        asynchronous and may take 10–120 seconds depending on document
+        complexity.
+      x-codeSamples:
+        - lang: 'bash'
+          label: 'cURL'
+          source: |
+            curl -X POST https://api.zero.urbanelabs.xyz/v1/documents/ingest \
+              -H "Authorization: Bearer <token>" \
+              -H "x-consultancy-id: <consultancy_uuid>" \
+              -H "Content-Type: application/json" \
+              -d '{"storage_url": "https://storage.supabase.co/...", "client_brand_id": "..."}'
+        - lang: 'javascript'
+          label: 'Node.js'
+          source: |
+            const response = await fetch("https://api.zero.urbanelabs.xyz/v1/documents/ingest", {
+              method: "POST",
+              headers: {
+                "Authorization": "Bearer <token>",
+                "x-consultancy-id": "<consultancy_uuid>",
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({
+                storage_url: "https://storage.supabase.co/...",
+                client_brand_id: "..."
+              })
+            });
+      tags:
+        - Documents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - storage_url
+                - client_brand_id
+              properties:
+                storage_url:
+                  type: string
+                  description: >
+                    Publicly accessible URL or pre-signed Supabase Storage URL
+                    pointing to the document to be processed.
+                  example: https://storage.supabase.co/object/public/docs/material-cert.pdf
+                client_brand_id:
+                  type: string
+                  format: uuid
+                  description: >
+                    The brand workspace this document belongs to. Must be a
+                    brand that belongs to the consultancy identified by the
+                    `x-consultancy-id` header, enforced via Row Level Security.
+                    Returns 403 if the brand does not belong to this tenant.
+                  example: 550e8400-e29b-41d4-a716-446655440000
+                product_id:
+                  type: string
+                  format: uuid
+                  description: >
+                    Optional. When provided, associates the ingested document
+                    with an existing product rather than creating a new one.
+                  example: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+      responses:
+        '202':
+          description: >
+            Accepted. The document has been queued for asynchronous processing.
+            Poll the `check_url` for status and results.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - job_id
+                  - status
+                  - check_url
+                properties:
+                  job_id:
+                    type: string
+                    description: Unique identifier for this ingestion job.
+                    example: job_01HZ8RNKPQ7X3M4V9CBJWDG5A
+                  status:
+                    type: string
+                    default: pending
+                    description: Initial job status. Always `pending` at submission time.
+                    example: pending
+                  check_url:
+                    type: string
+                    description: >
+                      Fully qualified URL to poll for job status. Maps to
+                      `GET /v1/documents/jobs/{job_id}`.
+                    example: https://api.zero.urbanelabs.xyz/v1/documents/jobs/job_01HZ8RNKPQ7X3M4V9CBJWDG5A
+        '400':
+          description: Bad Request — validation error in the request body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+        '401':
+          description: Unauthorized — missing or invalid Bearer token or x-consultancy-id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+        '403':
+          description: Forbidden — client_brand_id does not belong to this consultancy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+        '500':
+          description: Internal Server Error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+
+  /v1/documents/jobs/{job_id}:
+    get:
+      operationId: getJobStatus
+      summary: Poll ingestion job status
+      x-codeSamples:
+        - lang: 'bash'
+          label: 'cURL'
+          source: |
+            curl -X GET "https://api.zero.urbanelabs.xyz/v1/documents/jobs/job_01HZ8RNKPQ7X3M4V9CBJWDG5A" \
+              -H "Authorization: Bearer <token>" \
+              -H "x-consultancy-id: <consultancy_uuid>"
+        - lang: 'javascript'
+          label: 'Node.js'
+          source: |
+            const response = await fetch("https://api.zero.urbanelabs.xyz/v1/documents/jobs/job_01HZ8RNKPQ7X3M4V9CBJWDG5A", {
+              method: "GET",
+              headers: {
+                "Authorization": "Bearer <token>",
+                "x-consultancy-id": "<consultancy_uuid>"
+              }
+            });
+      tags:
+        - Documents
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The job ID returned by `POST /v1/documents/ingest`.
+          example: job_01HZ8RNKPQ7X3M4V9CBJWDG5A
+      responses:
+        '200':
+          description: Job status retrieved successfully.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - title: Pending or Processing
+                    description: The job is queued or currently being processed by the LangGraph pipeline.
+                    type: object
+                    required:
+                      - status
+                    properties:
+                      status:
+                        type: string
+                        enum:
+                          - pending
+                          - processing
+                  - title: Completed
+                    description: >
+                      Extraction succeeded. When `review_flags` is present, a
+                      human must verify the listed fields before the BOM can be
+                      used in compliance evaluation.
+                    type: object
+                    required:
+                      - status
+                      - result
+                    properties:
+                      status:
+                        type: string
+                        enum:
+                          - completed
+                      result:
+                        $ref: '#/components/schemas/ArticleBOM'
+                      review_flags:
+                        type: array
+                        description: >
+                          Fields flagged for manual verification. Present only
+                          when the pipeline detected low-confidence extractions.
+                        items:
+                          type: string
+                        example:
+                          - "articles[1].total_weight_grams"
+                          - "articles[1].material_composition"
+                  - title: Failed
+                    description: >
+                      The pipeline exhausted all retries. Inspect `error.code`
+                      for the failure category before resubmitting.
+                    type: object
+                    required:
+                      - status
+                      - error
+                    properties:
+                      status:
+                        type: string
+                        enum:
+                          - failed
+                      error:
+                        type: object
+                        required:
+                          - code
+                          - message
+                        properties:
+                          code:
+                            type: string
+                            description: Machine-readable failure reason.
+                            example: EXTRACTION_FAILED_MAX_RETRIES
+                          message:
+                            type: string
+                            description: Human-readable explanation of the failure.
+                            example: "LangGraph pipeline exhausted 3 retry attempts. Trigger human review or resubmit with a higher-quality document."
+        '400':
+          description: Bad Request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+        '403':
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+        '500':
+          description: Internal Server Error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+
+  /v1/compliance/evaluate:
+    post:
+      operationId: evaluateCompliance
+      summary: Calculate REACH SVHC compliance
+      tags:
+        - Compliance
+      description: >
+        Synchronously evaluates a Bill of Materials against the REACH SVHC
+        candidate list and returns a compliance verdict, violations list, and
+        lifecycle carbon footprint estimate.
+
+
+        If any article node in the submitted BOM has `total_weight_grams` of
+        null or zero, that node will be marked `requires_manual_review: true`
+        in the response and its concentration calculation will return `null`
+        rather than a numeric value. The overall `is_compliant` field will be
+        `false` if any node cannot be calculated. This is expected behaviour
+        for incomplete BOMs.
+      x-codeSamples:
+        - lang: 'bash'
+          label: 'cURL'
+          source: |
+            curl -X POST https://api.zero.urbanelabs.xyz/v1/compliance/evaluate \
+              -H "Authorization: Bearer <token>" \
+              -H "x-consultancy-id: <consultancy_uuid>" \
+              -H "Content-Type: application/json" \
+              -d '{"name": "Outer Shell", "total_weight_grams": 320.5, "material_composition": "78% Recycled Polyester, 22% Elastane"}'
+        - lang: 'javascript'
+          label: 'Node.js'
+          source: |
+            const response = await fetch("https://api.zero.urbanelabs.xyz/v1/compliance/evaluate", {
+              method: "POST",
+              headers: {
+                "Authorization": "Bearer <token>",
+                "x-consultancy-id": "<consultancy_uuid>",
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({
+                name: "Outer Shell",
+                total_weight_grams: 320.5,
+                material_composition: "78% Recycled Polyester, 22% Elastane"
+              })
+            });
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ArticleBOM'
+      responses:
+        '200':
+          description: Compliance evaluation completed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - is_compliant
+                  - carbon_footprint_kgco2e
+                  - violations
+                properties:
+                  is_compliant:
+                    type: boolean
+                    description: >
+                      `true` only if all article nodes pass REACH SVHC
+                      thresholds and all nodes have calculable weight data.
+                    example: false
+                  carbon_footprint_kgco2e:
+                    type: number
+                    format: double
+                    description: >
+                      Estimated lifecycle carbon footprint in kg CO₂-equivalent,
+                      calculated via Climatiq / Ecobalyse.
+                    example: 12.34
+                  violations:
+                    type: array
+                    description: >
+                      SVHC threshold violations detected across all BOM nodes.
+                      Empty array when `is_compliant` is `true`.
+                    items:
+                      $ref: '#/components/schemas/ComplianceViolation'
+        '400':
+          description: Bad Request — BOM failed schema validation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+        '403':
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+        '500':
+          description: Internal Server Error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+
+  /v1/passports/mint:
+    post:
+      operationId: mintPassport
+      summary: Cryptographically anchor a Digital Product Passport to Arweave
+      tags:
+        - Passports
+      description: >
+        Anchors a GDPR-sanitized Bill of Materials to the Arweave permaweb and
+        mints a corresponding Solana cNFT via Metaplex Bubblegum.
+
+
+        **CRITICAL:** Payloads sent to this endpoint are mathematically stripped
+        of `supplier_name`, `auditor_email`, `cost`, and `factory_location` via
+        our GDPR Sanitizer before anchoring. The API will return the SHA-256
+        `tenantHash` for cryptographic verification.
+
+
+        This operation is idempotent: submitting the same `Idempotency-Key`
+        twice within a 24-hour window returns the original mint response without
+        re-anchoring to the blockchain.
+      x-codeSamples:
+        - lang: 'bash'
+          label: 'cURL'
+          source: |
+            curl -X POST https://api.zero.urbanelabs.xyz/v1/passports/mint \
+              -H "Authorization: Bearer <token>" \
+              -H "x-consultancy-id: <consultancy_uuid>" \
+              -H "Idempotency-Key: <random_uuid>" \
+              -H "Content-Type: application/json" \
+              -d '{"name": "Outer Shell", "total_weight_grams": 320.5, "material_composition": "78% Recycled Polyester, 22% Elastane"}'
+        - lang: 'javascript'
+          label: 'Node.js'
+          source: |
+            const response = await fetch("https://api.zero.urbanelabs.xyz/v1/passports/mint", {
+              method: "POST",
+              headers: {
+                "Authorization": "Bearer <token>",
+                "x-consultancy-id": "<consultancy_uuid>",
+                "Idempotency-Key": "<random_uuid>",
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({
+                name: "Outer Shell",
+                total_weight_grams: 320.5,
+                material_composition: "78% Recycled Polyester, 22% Elastane"
+              })
+            });
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+          description: >
+            Client-generated unique key (UUID recommended) to prevent
+            double-minting. The server returns the original response on
+            duplicate submissions within a 24-hour window.
+          example: idem_01HZ8RNKPQ7X3M4V9CBJWDG5A
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ArticleBOM'
+      responses:
+        '200':
+          description: Passport minted and anchored successfully.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - tenantHash
+                  - arweaveTransactionId
+                  - minted_at
+                properties:
+                  tenantHash:
+                    type: string
+                    pattern: '^sha256:[a-f0-9]{64}$'
+                    description: >
+                      SHA-256 hash of the GDPR-sanitized payload, prefixed with
+                      `sha256:`. Use this to verify payload integrity against
+                      the on-chain anchor.
+                    example: "sha256:a3f1b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2"
+                  arweaveTransactionId:
+                    type: string
+                    description: >
+                      Arweave transaction ID. Retrieve the raw payload at
+                      `https://arweave.net/{arweaveTransactionId}`.
+                    example: xJ8q2mK9nL3pR6sT1uV4wY7zA0bC5dE8fG2hI5jK
+                  minted_at:
+                    type: string
+                    format: date-time
+                    description: ISO 8601 UTC timestamp of the anchoring event.
+                    example: "2026-04-29T13:45:00.000Z"
+        '400':
+          description: Bad Request — BOM failed GDPR sanitizer or schema validation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+        '403':
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+        '500':
+          description: Internal Server Error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+
+webhooks:
+  supplier.request_rejected:
+    post:
+      summary: Supplier request rejected
+      description: >
+        Fired when a supplier document upload request is rejected.
+
+
+        **HMAC-SHA256 Signature Verification (Node.js):**
+
+        ```js
+
+        const crypto = require('crypto');
+
+        const sig      = req.headers['x-zero-signature']; // "sha256=<hex>"
+
+        const expected = 'sha256=' + crypto
+          .createHmac('sha256', process.env.WEBHOOK_SECRET)
+          .update(req.rawBody)
+          .digest('hex');
+
+        if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+          return res.status(401).send('Invalid signature');
+        }
+
+        ```
+
+        All webhook payloads are signed using HMAC-SHA256. The signature is
+        included in the `X-Zero-Signature` header as `sha256=<hex_digest>`.
+        Consumers must verify this signature using their webhook secret before
+        processing any payload. Unverified payloads must be rejected with a 401
+        response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - request_id
+                - reason
+                - resubmit_url
+              properties:
+                request_id:
+                  type: string
+                  description: Unique identifier of the rejected supplier request.
+                  example: req_01HZ8RNKPQ7X3M4V9CBJWDG5A
+                reason:
+                  type: string
+                  description: Human-readable explanation of why the request was rejected.
+                  example: "Document format not supported. Accepted formats: PDF, CSV, JPEG."
+                resubmit_url:
+                  type: string
+                  description: URL the supplier should use to resubmit a corrected document.
+                  example: https://portal.zero.urbanelabs.xyz/resubmit/req_01HZ8RNKPQ7X3M4V9CBJWDG5A
+      responses:
+        '200':
+          description: >
+            Webhook received and acknowledged. Respond within 5 seconds to
+            prevent automatic retry.
+
+  supplier.document_uploaded:
+    post:
+      summary: Supplier document uploaded
+      description: >
+        Fired when a supplier successfully uploads a document via the
+        zero-login portal.
+
+
+        All webhook payloads are signed using HMAC-SHA256. The signature is
+        included in the `X-Zero-Signature` header as `sha256=<hex_digest>`.
+        Consumers must verify this signature using their webhook secret before
+        processing any payload. Unverified payloads must be rejected with a 401
+        response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - request_id
+                - storage_url
+              properties:
+                request_id:
+                  type: string
+                  description: Unique identifier of the supplier upload request.
+                  example: req_01HZ8RNKPQ7X3M4V9CBJWDG5A
+                storage_url:
+                  type: string
+                  description: >
+                    Supabase Storage URL of the uploaded document. Pass this
+                    directly as `storage_url` to `POST /v1/documents/ingest`
+                    to trigger AI extraction.
+                  example: https://storage.supabase.co/object/public/supplier-uploads/doc-abc123.pdf
+      responses:
+        '200':
+          description: Webhook received and acknowledged.
+
+  passport.anchored_to_ledger:
+    post:
+      summary: Passport anchored to ledger
+      description: >
+        Fired when a Digital Product Passport is successfully anchored to the
+        Arweave permaweb and the Solana cNFT is confirmed on-chain.
+
+
+        All webhook payloads are signed using HMAC-SHA256. The signature is
+        included in the `X-Zero-Signature` header as `sha256=<hex_digest>`.
+        Consumers must verify this signature using their webhook secret before
+        processing any payload. Unverified payloads must be rejected with a 401
+        response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - product_id
+                - arweaveTransactionId
+                - tenantHash
+                - gs1_digital_link_uri
+                - anchored_at
+              properties:
+                product_id:
+                  type: string
+                  format: uuid
+                  description: UUID of the product whose passport was anchored.
+                  example: 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+                arweaveTransactionId:
+                  type: string
+                  description: Arweave transaction ID for the anchored DPP payload.
+                  example: xJ8q2mK9nL3pR6sT1uV4wY7zA0bC5dE8fG2hI5jK
+                tenantHash:
+                  type: string
+                  pattern: '^sha256:[a-f0-9]{64}$'
+                  description: >
+                    SHA-256 hash of the GDPR-sanitized payload. Use to verify
+                    cryptographic integrity against the on-chain anchor.
+                  example: "sha256:a3f1b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2"
+                gs1_digital_link_uri:
+                  type: string
+                  description: >
+                    GS1 Digital Link URI for this product, conforming to the
+                    GS1 Digital Link standard. Used to generate consumer-facing
+                    QR codes.
+                  example: https://id.gs1.org/01/09521234543213/21/456789
+                anchored_at:
+                  type: string
+                  format: date-time
+                  description: ISO 8601 UTC timestamp of the on-chain anchoring event.
+                  example: "2026-04-29T13:45:00.000Z"
+      responses:
+        '200':
+          description: Webhook received and acknowledged.

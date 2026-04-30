@@ -1,0 +1,33 @@
+{
+  "name": "Zero by Urbane Labs",
+  "logo": { "light": "/logo.png", "dark": "/logo.png" },
+  "favicon": "/favicon.png",
+  "colors": {
+    "primary": "#F5E6AD",
+    "light": "#F5E6AD",
+    "dark": "#D4C4A8",
+    "background": {
+      "dark": "#050B14"
+    }
+  },
+  "modeToggle": {
+    "default": "dark"
+  },
+  "openapi": "openapi.yaml",
+  "navigation": [
+    { "group": "Getting Started", "pages": ["introduction", "authentication"] },
+    { "group": "Core Endpoints", "pages": [
+        "api-reference/ingest",
+        "api-reference/status",
+        "api-reference/evaluate",
+        "api-reference/mint"
+      ]
+    },
+    { "group": "Webhooks", "pages": [
+        "api-reference/webhook-rejected",
+        "api-reference/webhook-uploaded",
+        "api-reference/webhook-anchored"
+      ]
+    }
+  ]
+}
